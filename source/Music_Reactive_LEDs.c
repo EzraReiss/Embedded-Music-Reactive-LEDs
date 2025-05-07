@@ -11,16 +11,11 @@
 #include <board.h>
 #include <MKL46Z4.h>
 #include <fsl_debug_console.h>
+#include <rolling_buffer.h>
+#include <time.h>
 
-#define BUFFER_SIZE 256
 
-typedef struct {
-	uint8_t index;
-	uint32_t mic_vals[BUFFER_SIZE];
-	uint64_t buffer_power;
-}mic_buffer;
 
-mic_buffer mic_data;
 
 
 
@@ -36,14 +31,14 @@ void SetupADC(){
 
 	//Enable clock gate for ADC0
 	SIM->SCGC6 |= (1 << 27);
-
+	ADC0->CFG1 = ADC_CFG1_ADICLK(0b00) | ADC_CFG1_MODE(0b01) | ADC_CFG1_ADIV(0b00);
 	// Setup ADC
-	ADC0->CFG1 = 0;  // Default everything.
-	ADC0->CFG1 |= ADC_CFG1_ADICLK(0b00); // Use bus clock.
-	ADC0->CFG1 |= ADC_CFG1_MODE(0b11); //we are using 12bit
-										 // 00 for 8-bit
-	                                     // 01 for 12-bit
-	                                     // 10 for 10-bit
+	// ADC0->CFG1 = 0;  // Default everything.
+	// ADC0->CFG1 |= ADC_CFG1_ADICLK(0b00); // Use bus clock.
+	// ADC0->CFG1 |= ADC_CFG1_MODE(0b11); //we are using 12bit
+	// 									 // 00 for 8-bit
+	//                                      // 01 for 12-bit
+	//                                      // 10 for 10-bit
 	                                     // 11 for 16-bit
 
 	//Calibrate
@@ -78,39 +73,37 @@ void SetupADC(){
 	return;
 }
 
-void push_to_buffer() {
-	uint32_t old_val = mic_data.mic_vals[mic_data.index];
-	mic_data.buffer_power -= old_val;
-	uint16_t new_val = ADC0->R[0];
-	uint32_t new_power = new_val*new_val;
-	new_power = new_power >> 8;
-	mic_data.buffer_power += new_power;
-	mic_data.mic_vals[mic_data.index] = new_power;
-	mic_data.index++;
-}
 
 int main(void) {
-	mic_data.index = 0;
-	mic_data.buffer_power = 0;
-	for (int i = 0; i < BUFFER_SIZE; i++) {
-		mic_data.mic_vals[i] = 0;
-	}
-
-
     BOARD_InitBootPins();
     BOARD_InitBootClocks();
     BOARD_InitDebugConsole();
+	SetupADC();
+	mic_buffer mic_data;
+	init_mic_buffer(&mic_data);
+	unsigned int sample_counter = 0;
+	clock_t start_time = clock();
+	while(1) {
+		ADC0->SC1[0] = ADC_SC1_ADCH(8);      // ADC0_SE8 = PTB0
 
-    SetupADC();
+		while (!(ADC0->SC1[0] & ADC_SC1_COCO_MASK));  // wait for conversion complete
+		push_to_buffer(&mic_data, ADC0->R[0]);           // push the ADC value to the buffer
 
-    while(1) {
-        ADC0->SC1[0] = ADC_SC1_ADCH(8);      // ADC0_SE8 = PTB0
-        while (!(ADC0->SC1[0] & ADC_SC1_COCO_MASK));  // wait for complete
-        push_to_buffer();
-        if (mic_data.buffer_power > 700043789) {
-        	PRINTF("%lld \n ", mic_data.buffer_power);
-        	PRINTF("SUPER LOUD NOISE \n");
-        }
+		sample_counter++;
+		// Every 1000 samples, compute and print the elapsed time.
+		if (sample_counter >= 256) {
+			clock_t end_time = clock();
+			uint32_t elapsed_milliseconds = (1000 * (end_time - start_time)) / CLOCKS_PER_SEC;
+			PRINTF("Elapsed time for 1000 samples: %lld milliseconds\n", get_average_power(&mic_data));
+			sample_counter = 0;          // reset sample counter
+			start_time = clock();        // restart timing for next 1000 samples
+		}
+
+		// Optionally, you can keep the loud noise check if needed.
+//		if (mic_data.buffer_power > 10000ULL) {
+//			PRINTF("%llu \n", mic_data.buffer_power);
+//			PRINTF("SUPER LOUD NOISE \n");
+//		}
 //        PRINTF("%lld %ld \n", mic_data.buffer_power, mic_data.mic_vals[mic_data.index - 1]);
 //        PRINTF("%lld \n ", mic_data.buffer_power);
     }
